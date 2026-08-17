@@ -1,0 +1,26 @@
+{
+    "name": "image",
+    "version": "1.0.0",
+    "kernel": "^1.0",
+    "solves": "image.processing",
+    "type": "module",
+
+    "requires": [],
+    "exposes": ["Plugins\\Image\\API\\Contracts\\ImageProcessorContract"],
+
+    "routes": [],
+    "emits": [],
+    "listens": [],
+
+    "config": [
+        { "key": "IMAGE_DRIVER",          "type": "string", "required": false, "default": "gd" },
+        { "key": "IMAGE_DEFAULT_FORMAT",  "type": "string", "required": false, "default": "webp" },
+        { "key": "IMAGE_QUALITY",         "type": "int",    "required": false, "default": 82 },
+        { "key": "IMAGE_MAX_BYTES",       "type": "int",    "required": false, "default": 10485760 },
+        { "key": "IMAGE_ALLOWED_MIME",    "type": "string", "required": false, "default": "image/jpeg,image/png,image/webp,image/gif,image/avif" },
+        { "key": "IMAGE_MAX_WIDTH",       "type": "int",    "required": false, "default": 8000 },
+        { "key": "IMAGE_MAX_HEIGHT",      "type": "int",    "required": false, "default": 8000 },
+        { "key": "IMAGE_VARIANT_PRESETS", "type": "string", "required": false, "default": "thumbnail:150,medium:300,large:1024" },
+        { "key": "IMAGE_WATERMARK_TTF_PATH", "type": "string", "required": false }
+    ]
+}

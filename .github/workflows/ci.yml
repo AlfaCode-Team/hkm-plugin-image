@@ -1,0 +1,35 @@
+name: CI
+"on":
+  push: { branches: [main] }
+  pull_request: { branches: [main] }
+  workflow_dispatch:
+permissions: { contents: read }
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          # gd is the default engine; exif backs EXIF-orientation reading;
+          # imagick and ffi (for jcupitt/vips, installed below) exercise the
+          # two optional richer drivers so all three engines get covered in
+          # CI, not just the zero-dependency default.
+          extensions: json, mbstring, ctype, tokenizer, filter, fileinfo, gd, exif, imagick, ffi
+          tools: composer
+          coverage: none
+
+      - name: Install libvips (for the optional vips driver's tests)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvips42
+
+      - name: Validate composer.json
+        run: composer validate --strict --no-check-publish
+
+      - name: Install dependencies
+        run: composer update --no-interaction --no-progress --prefer-dist
+
+      - name: PHPUnit
+        run: vendor/bin/phpunit --no-coverage

@@ -1,0 +1,16 @@
+/vendor/
+composer.lock
+.phpunit.cache/
+.phpunit.result.cache
+.DS_Store
+
+# LaTeX build byproducts and raw probe dumps from docs/generators/ — the
+# finished PDFs (docs/*.pdf) and the generator source (docs/generators/*.php,
+# *.py, README.md) are committed; everything lualatex/php regenerate isn't.
+docs/generators/*.aux
+docs/generators/*.log
+docs/generators/*.out
+docs/generators/*.toc
+docs/generators/*.tex
+docs/generators/*.pdf
+docs/generators/*_data.json
