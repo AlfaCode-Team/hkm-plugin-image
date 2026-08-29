@@ -59,7 +59,6 @@ A route or job that resolves `ImageProcessorContract` must declare
 
 ## Documentation
 
-- [CLAUDE.md](CLAUDE.md) — this plugin's contract, config and rules (start here).
 - [Kernel guides](https://github.com/AlfaCode-Team/hkm-kernel/tree/main/docs/guides) — the framework contracts this plugin builds on.
 - [docs/Image-Plugin-Usage-Guide.pdf](docs/Image-Plugin-Usage-Guide.pdf) — the full method reference, every example run against real GD/Imagick/Vips.
 - [docs/Image-Upload-WordPress-Compression-Guide.pdf](docs/Image-Upload-WordPress-Compression-Guide.pdf) — file upload, base64/data-URI upload, WordPress-style sizes, and a measured compression guide.
