@@ -101,6 +101,9 @@ photo comes out slightly duller through GD.
 ### Running the Vips engine
 
 1. Install libvips: `apt install libvips42` (Debian/Ubuntu) or `brew install vips`.
+   In a project, also run `composer require jcupitt/vips`. `hkm plugins
+   install` does not install a plugin's composer dependencies into the
+   project, and the project's `vendor/` is where the classes are loaded from.
 2. Allow FFI for the web SAPI. Set **`ffi.enable=true`** in the php.ini PHP-FPM
    reads. Many builds default to `ffi.enable=preload`, which allows FFI in the
    CLI only. With it, the test suite and every `hkm` command work while every

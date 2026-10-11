@@ -40,7 +40,10 @@ now holds every engine to the same promises.
   `ffi.enable=preload`.** That setting allows FFI in the CLI only. The
   availability check now reads the SAPI's `ffi.enable` and really loads
   libvips. `Provider::vipsUnavailableReason()` says why it cannot run, and a
-  web request no longer gets a misleading "Unable to open library".
+  web request no longer gets a misleading "Unable to open library". The
+  README now says that a project must `composer require jcupitt/vips` itself,
+  because `hkm plugins install` does not install a plugin's composer
+  dependencies.
 - **Vips: `pixelate()` crashed** on an image smaller than its block.
 - **Vips: warning spam.** A truncated JPEG's warning stayed in libvips' error
   buffer, and every later warning re-logged the whole buffer. It is now

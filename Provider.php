@@ -128,8 +128,10 @@ final class Provider implements ModuleContract
                 => 'the ext-ffi PHP extension is not loaded.',
             !in_array($ffi, ['1', 'true', 'on', 'yes'], true) && !($ffi === 'preload' && PHP_SAPI === 'cli')
                 => "ext-ffi is restricted for this SAPI (ffi.enable={$ffi}, sapi=" . PHP_SAPI . '): set ffi.enable=true in php.ini.',
+            // `hkm plugins install` does not install a plugin's composer
+            // dependencies into the project: the PROJECT must require it.
             !class_exists(\Jcupitt\Vips\Image::class)
-                => 'the jcupitt/vips composer package is not installed.',
+                => 'the jcupitt/vips package is not installed: run `composer require jcupitt/vips` in the project.',
             default => self::libvipsLoadError(),
         };
     }
