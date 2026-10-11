@@ -381,7 +381,7 @@ final class ImagickImageEngine implements ImageProcessorContract
             $draw->setFillOpacity(max(0, min(100, $opacityPercent)) / 100);
             $draw->setTextAntialias(true);
 
-            $metrics = $img->queryFontMetrics($draw, $text);
+            $metrics = $this->fontMetrics($img, $draw, $text);
             $textW   = (int) round($metrics['textWidth']);
             $textH   = (int) round($metrics['textHeight']);
 
@@ -401,6 +401,37 @@ final class ImagickImageEngine implements ImageProcessorContract
             throw new GatewayException("Image(Imagick): text watermark failed: {$e->getMessage()}", layer: 'gateway.image.imagick', previous: $e);
         } finally {
             $img->destroy();
+        }
+    }
+
+    /**
+     * ImageMagick's default font is whatever its type.xml names; on a host
+     * where that font is not installed (a bare CI runner, a slim container)
+     * every text call fails with "unable to read font `(null)'". Retry once
+     * with the first font ImageMagick can actually see, and when it sees none,
+     * say what to install instead of passing that message on.
+     *
+     * @return array<string, mixed>
+     */
+    private function fontMetrics(\Imagick $img, \ImagickDraw $draw, string $text): array
+    {
+        try {
+            return $img->queryFontMetrics($draw, $text);
+        } catch (\ImagickException $e) {
+            if (!str_contains($e->getMessage(), 'font')) {
+                throw $e;
+            }
+            $fonts = \Imagick::queryFonts('*');
+            if ($fonts === []) {
+                throw new GatewayException(
+                    'Image(Imagick): no font is available for watermarkText() — install one (e.g. fonts-dejavu-core).',
+                    layer: 'gateway.image.imagick',
+                    previous: $e,
+                );
+            }
+            $draw->setFont($fonts[0]);
+
+            return $img->queryFontMetrics($draw, $text);
         }
     }
 
@@ -475,19 +506,11 @@ final class ImagickImageEngine implements ImageProcessorContract
             match ($mode) {
                 // bestfit=false + both dims => distort to the exact size ("!").
                 ResizeMode::Stretch => $img->resizeImage($targetWidth, $targetHeight, \Imagick::FILTER_LANCZOS, 1, false),
-                // bestfit=true => fit within the box, preserve aspect, no crop, no upscale.
-                // Deliberately only 3 args: thumbnailImage()'s optional
-                // "fill"/"legacy" parameters have differed across
-                // ext-imagick releases, and their default is false in
-                // every version's docs this was checked against — which
-                // is exactly what Contain wants — so omitting them is
-                // both simpler and safe against that drift.
-                ResizeMode::Contain => $img->thumbnailImage($targetWidth, $targetHeight, true),
-                // scale + center-crop to the exact size. No content-aware
-                // crop primitive in Imagick — Smart falls back to plain
-                // Cover, same as GD (Vips is the only engine with a real
-                // ResizeMode::Smart implementation).
-                ResizeMode::Cover, ResizeMode::Smart => $img->cropThumbnailImage($targetWidth, $targetHeight),
+                ResizeMode::Contain => $this->containImage($img, $srcW, $srcH, $targetWidth, $targetHeight),
+                // No content-aware crop primitive in Imagick — Smart falls
+                // back to plain Cover, same as GD (Vips is the only engine
+                // with a real ResizeMode::Smart implementation).
+                ResizeMode::Cover, ResizeMode::Smart => $this->coverImage($img, $srcW, $srcH, $targetWidth, $targetHeight),
             };
         } catch (\ImagickException $e) {
             throw new GatewayException(
@@ -498,6 +521,45 @@ final class ImagickImageEngine implements ImageProcessorContract
         }
 
         return $this->encode($img, $format, $quality);
+    }
+
+    /**
+     * Fit inside the box, never larger than the source. thumbnailImage()'s
+     * own bestfit UPSCALES (a 60x120 picture asked to fit 200x200 came back
+     * 100x200 — caught by EngineConformanceTestCase on CI), so the scale is
+     * computed here, capped at 1, exactly as GD does it.
+     */
+    private function containImage(\Imagick $img, int $srcW, int $srcH, int $boxW, int $boxH): void
+    {
+        $scale = min($boxW / $srcW, $boxH / $srcH, 1.0);
+        if ($scale < 1.0) {
+            $img->thumbnailImage(max(1, (int) round($srcW * $scale)), max(1, (int) round($srcH * $scale)));
+        }
+    }
+
+    /**
+     * Centre-crop to the box's aspect ratio, then shrink to the box — never
+     * enlarge. cropThumbnailImage() upscales a source smaller than the box,
+     * so the crop is computed here with GD's coverGeometry() arithmetic: a
+     * crop already smaller than the box ships at its native size.
+     */
+    private function coverImage(\Imagick $img, int $srcW, int $srcH, int $boxW, int $boxH): void
+    {
+        $targetRatio = $boxW / $boxH;
+        if ($srcW / $srcH > $targetRatio) {
+            $cropH = $srcH;
+            $cropW = max(1, (int) round($srcH * $targetRatio));
+        } else {
+            $cropW = $srcW;
+            $cropH = max(1, (int) round($srcW / $targetRatio));
+        }
+
+        $img->cropImage($cropW, $cropH, intdiv($srcW - $cropW, 2), intdiv($srcH - $cropH, 2));
+        $img->setImagePage(0, 0, 0, 0); // drop the crop's virtual-canvas offset
+
+        if ($cropW > $boxW || $cropH > $boxH) {
+            $img->resizeImage(min($boxW, $cropW), min($boxH, $cropH), \Imagick::FILTER_LANCZOS, 1, false);
+        }
     }
 
     /**

@@ -372,6 +372,9 @@ final class ImagickImageEngineTest extends TestCase
 
     public function test_watermark_text_does_not_error(): void
     {
+        if (\Imagick::queryFonts('*') === []) {
+            self::markTestSkipped('ImageMagick sees no font on this host.');
+        }
         $bg   = $this->jpegColor(100, 100, 255, 255, 255);
         $dims = $this->engine()->dimensions($this->engine()->watermarkText($bg, 'HI', Position::BottomRight, 14, '#FFFFFF'));
         self::assertSame(100, $dims->width);
@@ -385,6 +388,9 @@ final class ImagickImageEngineTest extends TestCase
      */
     public function test_watermark_text_baseline_lands_near_the_intended_top(): void
     {
+        if (\Imagick::queryFonts('*') === []) {
+            self::markTestSkipped('ImageMagick sees no font on this host.');
+        }
         $bg = $this->jpegColor(100, 100, 255, 255, 255);
 
         $out  = $this->engine()->watermarkText($bg, 'Hyj', Position::TopLeft, 20, '#000000', 100, 5, 5);

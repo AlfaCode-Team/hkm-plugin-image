@@ -45,6 +45,14 @@ now holds every engine to the same promises.
 - **Vips: warning spam.** A truncated JPEG's warning stayed in libvips' error
   buffer, and every later warning re-logged the whole buffer. It is now
   cleared after each load.
+- **Imagick enlarged small pictures** in `Contain` and `Cover`, which the
+  contract says never upscale: `thumbnailImage()`'s bestfit and
+  `cropThumbnailImage()` both enlarge. The fit and the crop are now computed
+  the way GD computes them.
+- **Imagick text watermarks failed on a host without ImageMagick's default
+  font** ("unable to read font `(null)'"). They now retry with a font
+  ImageMagick can see, or say which fonts to install. CI installs
+  `fonts-dejavu-core`.
 - `orient()` on Vips and Imagick returned re-encoded bytes for an image that
   was already upright. The contract promises the bytes back untouched, as GD
   did.

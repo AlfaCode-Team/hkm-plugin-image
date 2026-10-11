@@ -22,8 +22,10 @@ jobs:
           tools: composer
           coverage: none
 
-      - name: Install libvips (for the optional vips driver's tests)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvips42
+      # fonts-dejavu-core: ImageMagick's text watermark needs a font, and the
+      # bare runner has none ("unable to read font `(null)'").
+      - name: Install libvips and a font (for the optional drivers' tests)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libvips42 fonts-dejavu-core
 
       - name: Validate composer.json
         run: composer validate --strict --no-check-publish
