@@ -66,10 +66,11 @@ if (!function_exists('image_config_fallback')) {
 if (!function_exists('image_variant_presets')) {
     /**
      * Parse "name:width,name:width" into ['name' => width, ...] — the shape
-     * ImageProcessorContract::variants() expects. Defaults to the
+     * ImageProcessorContract::variants() expects. A "name:WxH" entry becomes
+     * a [W, H] box (fit inside it, either orientation). Defaults to the
      * IMAGE_VARIANT_PRESETS config value when $spec is omitted.
      *
-     * @return array<string, int>
+     * @return array<string, int|array{0: int, 1: int}>
      */
     function image_variant_presets(?string $spec = null): array
     {
@@ -81,10 +82,19 @@ if (!function_exists('image_variant_presets')) {
             if ($entry === '' || !str_contains($entry, ':')) {
                 continue;
             }
-            [$name, $width] = explode(':', $entry, 2);
-            $name  = trim($name);
-            $width = (int) trim($width);
-            if ($name !== '' && $width > 0) {
+            [$name, $size] = explode(':', $entry, 2);
+            $name = trim($name);
+            if ($name === '') {
+                continue;
+            }
+            if (preg_match('/^\s*(\d+)\s*x\s*(\d+)\s*$/i', $size, $box) === 1) {
+                if ((int) $box[1] > 0 && (int) $box[2] > 0) {
+                    $presets[$name] = [(int) $box[1], (int) $box[2]];
+                }
+                continue;
+            }
+            $width = (int) trim($size);
+            if ($width > 0) {
                 $presets[$name] = $width;
             }
         }

@@ -15,6 +15,7 @@ use Plugins\Image\Domain\ValueObjects\ImageFormat;
 use Plugins\Image\Domain\ValueObjects\ImageVariant;
 use Plugins\Image\Domain\ValueObjects\Position;
 use Plugins\Image\Domain\ValueObjects\ResizeMode;
+use Plugins\Image\Domain\ValueObjects\VariantSize;
 use Plugins\Image\Infrastructure\Engines\Concerns\InspectsImages;
 
 /**
@@ -34,6 +35,17 @@ use Plugins\Image\Infrastructure\Engines\Concerns\InspectsImages;
  * against a real orientation=6 JPEG in this repo's tests, so orient()/resize()
  * need no hand-written rotation math at all (unlike GdImageEngine, which does
  * and had a real transpose/transverse sign bug caught by testing it).
+ *
+ * Every other method decodes through decode(), which applies the EXIF
+ * orientation and converts to sRGB (embedded ICC profile, or CMYK) before
+ * anything else — every encode() strips metadata, so an orientation or a
+ * profile that was not applied would be lost and the picture published
+ * sideways, or with its colours shifted.
+ *
+ * HOST REQUIREMENT under PHP-FPM: ext-ffi must be allowed for the web SAPI.
+ * With php.ini's common `ffi.enable=preload`, FFI works in the CLI only and
+ * the first image a web request touches fails — set `ffi.enable=true`.
+ * Provider::vipsUnavailableReason() checks this before binding the engine.
  *
  * VERIFIED BY EXECUTION: every call in this file was run against real image
  * bytes (including a hand-built JPEG carrying a genuine EXIF Orientation
@@ -77,19 +89,16 @@ final class VipsImageEngine implements ImageProcessorContract
     public function orient(string $contents): string
     {
         $format = $this->detectFormat($contents);
-        $img    = $this->decode($contents);
 
-        try {
-            $oriented = $img->autorot();
-        } catch (VipsException $e) {
-            throw new GatewayException("Image(Vips): auto-orient failed: {$e->getMessage()}", layer: 'gateway.image.vips', previous: $e);
+        if ($this->orientationOf($this->load($contents)) <= 1) {
+            return $contents; // already upright: the contract promises the bytes back untouched
         }
 
-        return $this->encode($oriented, $format, $this->defaultQuality);
+        return $this->encode($this->decode($contents), $format, $this->defaultQuality); // decode() rotates
     }
 
     /**
-     * @param array<string, int> $presets
+     * @param array<string, int|array{0: int, 1: int}> $presets
      * @return array<string, ImageVariant>
      */
     public function variants(
@@ -99,12 +108,16 @@ final class VipsImageEngine implements ImageProcessorContract
         ?int $quality = null,
         ResizeMode $mode = ResizeMode::Cover,
     ): array {
+        $sizes        = array_map(VariantSize::from(...), $presets);
         $targetFormat = $format ?? $this->detectFormat($contents);
         $q            = $quality ?? $this->defaultQuality;
 
+        // One thumbnail_buffer() per preset rather than one shared decode:
+        // shrink-on-load makes each small preset far cheaper than resampling
+        // a full-size decode, which is the trade GD and Imagick cannot make.
         $result = [];
-        foreach ($presets as $name => $width) {
-            $bytes = $this->resizeInternal($contents, (int) $width, null, $mode, $targetFormat, $q);
+        foreach ($sizes as $name => $size) {
+            $bytes = $this->resizeInternal($contents, $size->width, $size->height, $mode, $targetFormat, $q);
             $dims  = $this->dimensions($bytes);
             $result[$name] = new ImageVariant($name, $bytes, $dims->width, $dims->height, $targetFormat);
         }
@@ -168,7 +181,11 @@ final class VipsImageEngine implements ImageProcessorContract
     {
         $format = $this->detectFormat($contents);
         $img    = $this->decode($contents);
-        $block  = max(1, $blockSize);
+        // A block wider than the picture would shrink it below one pixel.
+        $block  = max(1, min($blockSize, $img->width, $img->height));
+        if ($block === 1) {
+            return $this->encode($img, $format, $this->defaultQuality);
+        }
 
         try {
             $small     = $img->resize(1 / $block, ['kernel' => 'nearest']);
@@ -361,8 +378,11 @@ final class VipsImageEngine implements ImageProcessorContract
         }
 
         // 'size' => 'down' never upscales (skipped only for Stretch, which
-        // is explicitly allowed to force any size).
-        $options = ['size' => 'down'];
+        // is explicitly allowed to force any size). 'export_profile' makes
+        // thumbnail() convert to sRGB — verified on libvips 8.18: without it
+        // a Display P3 photo kept its P3 numbers, and once encode() strips
+        // the profile those read as (duller) sRGB.
+        $options = ['size' => 'down', 'export_profile' => 'srgb'];
         if ($height !== null) {
             $options['height'] = max(1, $height);
         }
@@ -377,16 +397,34 @@ final class VipsImageEngine implements ImageProcessorContract
             $options['size'] = 'force';
         }
 
+        // thumbnail_buffer() rotates by EXIF orientation itself.
         try {
             $thumb = VipsImage::thumbnail_buffer($contents, max(1, $width), $options);
         } catch (VipsException $e) {
             throw new \DomainException('Image(Vips): could not decode image data — unsupported or corrupt file.', previous: $e);
+        } finally {
+            self::clearErrorBuffer();
         }
 
         return $this->encode($thumb, $srcFormat, $quality ?? $this->defaultQuality);
     }
 
+    /** Decoded, upright, sRGB — see the class docblock. */
     private function decode(string $contents): VipsImage
+    {
+        $img = $this->load($contents);
+
+        try {
+            $img = $img->autorot();
+        } catch (VipsException $e) {
+            throw new GatewayException("Image(Vips): auto-orient failed: {$e->getMessage()}", layer: 'gateway.image.vips', previous: $e);
+        }
+
+        return $this->toSrgb($img);
+    }
+
+    /** The pixels as stored — no rotation, no colour conversion. */
+    private function load(string $contents): VipsImage
     {
         $this->guardDecodable($contents);
 
@@ -394,6 +432,53 @@ final class VipsImageEngine implements ImageProcessorContract
             return VipsImage::newFromBuffer($contents);
         } catch (VipsException $e) {
             throw new \DomainException('Image(Vips): could not decode image data — unsupported or corrupt file.', previous: $e);
+        } finally {
+            self::clearErrorBuffer();
+        }
+    }
+
+    private function orientationOf(VipsImage $img): int
+    {
+        return $img->typeof('orientation') !== 0 ? (int) $img->get('orientation') : 1;
+    }
+
+    /**
+     * Embedded profile (a phone's Display P3, a print CMYK) or bare CMYK →
+     * sRGB, the only space a browser assumes once the profile is stripped.
+     * Best effort: a profile lcms cannot read leaves the pixels as they were
+     * rather than failing the whole operation over colour accuracy.
+     */
+    private function toSrgb(VipsImage $img): VipsImage
+    {
+        try {
+            if ($img->typeof('icc-profile-data') !== 0) {
+                return $img->icc_transform('srgb', ['embedded' => true, 'intent' => 'relative']);
+            }
+            if ($img->interpretation === Interpretation::CMYK) {
+                return $img->colourspace(Interpretation::SRGB);
+            }
+        } catch (VipsException) {
+            // keep the untransformed pixels
+        } finally {
+            self::clearErrorBuffer();
+        }
+
+        return $img;
+    }
+
+    /**
+     * libvips appends every decoder WARNING (a truncated JPEG's "premature
+     * end of JPEG image") to a process-wide error buffer that only an error
+     * clears, and logs the whole buffer again with each new warning — so a
+     * long-running worker's log grew by one more copy of every old warning on
+     * each image. Cleared after every load.
+     */
+    private static function clearErrorBuffer(): void
+    {
+        try {
+            \Jcupitt\Vips\FFI::vips()->vips_error_clear();
+        } catch (\Throwable) {
+            // jcupitt/vips internals changed: losing this only costs log noise
         }
     }
 
@@ -414,7 +499,14 @@ final class VipsImageEngine implements ImageProcessorContract
         };
 
         try {
-            return $img->writeToBuffer('.' . $format->extension(), $options);
+            if ($format === ImageFormat::Jpeg && $img->hasAlpha()) {
+                // JPEG has no alpha; jpegsave would drop it and leave the
+                // transparent pixels' colour (usually black) showing.
+                $white = in_array($img->interpretation, [Interpretation::RGB16, Interpretation::GREY16], true) ? 65535 : 255;
+                $img   = $img->flatten(['background' => array_fill(0, $img->bands - 1, $white)]);
+            }
+
+            return $this->assertEncoded($img->writeToBuffer('.' . $format->extension(), $options), $format, 'Vips');
         } catch (VipsException $e) {
             throw new GatewayException(
                 "Image(Vips): failed to encode image as [{$format->value}]: {$e->getMessage()}",

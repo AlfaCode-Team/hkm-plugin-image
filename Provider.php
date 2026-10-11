@@ -71,23 +71,16 @@ final class Provider implements ModuleContract
         // matches what the 0.3 ImageService used) > imagick > gd.
         if ($driver === 'auto') {
             $driver = match (true) {
-                self::vipsAvailable()        => 'vips',
-                extension_loaded('imagick')  => 'imagick',
-                default                      => 'gd',
+                self::vipsUnavailableReason() === null => 'vips',
+                extension_loaded('imagick')            => 'imagick',
+                default                                => 'gd',
             };
         }
 
         if ($driver === 'vips') {
-            if (!self::vipsAvailable()) {
-                // jcupitt/vips is a hard `require` of this plugin's own
-                // composer.json, so its class is normally always present —
-                // if this throws, the remaining suspects are ext-ffi not
-                // being loaded, or (composer can't detect this at all) the
-                // libvips SYSTEM LIBRARY not being installed on this host.
-                throw new \RuntimeException(
-                    'Image: IMAGE_DRIVER=vips but jcupitt/vips is unavailable — check that ext-ffi is loaded '
-                    . 'and that the libvips shared library is installed on this host.',
-                );
+            $reason = self::vipsUnavailableReason();
+            if ($reason !== null) {
+                throw new \RuntimeException("Image: IMAGE_DRIVER=vips but {$reason}");
             }
             $container->singleton(ImageProcessorContract::class, static fn() => new VipsImageEngine($quality, $maxWidth, $maxHeight, $maxBytes));
             return;
@@ -111,12 +104,44 @@ final class Provider implements ModuleContract
     }
 
     /**
+     * Why the vips engine cannot run in THIS process, or null when it can.
+     *
      * jcupitt/vips is a composer package built on ext-ffi, not a PHP
-     * extension itself — extension_loaded() can't detect it.
+     * extension, so extension_loaded() cannot see it — and "the classes
+     * exist" was not enough either. php.ini's common `ffi.enable=preload`
+     * allows FFI in the CLI only: the CLI (and the test suite) worked while
+     * every web request failed on its first image. So this checks the SAPI's
+     * ffi.enable and then really loads libvips once (memoised per process —
+     * a fact about the host, not about any request).
      */
-    private static function vipsAvailable(): bool
+    public static function vipsUnavailableReason(): ?string
     {
-        return extension_loaded('ffi') && class_exists(\Jcupitt\Vips\Image::class);
+        static $reason = false;
+        if ($reason !== false) {
+            return $reason;
+        }
+
+        $ffi = strtolower((string) ini_get('ffi.enable'));
+
+        return $reason = match (true) {
+            !extension_loaded('ffi')
+                => 'the ext-ffi PHP extension is not loaded.',
+            !in_array($ffi, ['1', 'true', 'on', 'yes'], true) && !($ffi === 'preload' && PHP_SAPI === 'cli')
+                => "ext-ffi is restricted for this SAPI (ffi.enable={$ffi}, sapi=" . PHP_SAPI . '): set ffi.enable=true in php.ini.',
+            !class_exists(\Jcupitt\Vips\Image::class)
+                => 'the jcupitt/vips composer package is not installed.',
+            default => self::libvipsLoadError(),
+        };
+    }
+
+    private static function libvipsLoadError(): ?string
+    {
+        try {
+            \Jcupitt\Vips\Config::version();
+            return null;
+        } catch (\Throwable $e) {
+            return 'the libvips shared library could not be loaded (' . $e->getMessage() . '). Install libvips (apt install libvips42 / brew install vips).';
+        }
     }
 
     public function boot(HttpPipeline $http, CliPipeline $cli, WorkerPipeline $worker, EventBus $events): void

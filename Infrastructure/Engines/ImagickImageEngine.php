@@ -11,6 +11,7 @@ use Plugins\Image\Domain\ValueObjects\ImageFormat;
 use Plugins\Image\Domain\ValueObjects\ImageVariant;
 use Plugins\Image\Domain\ValueObjects\Position;
 use Plugins\Image\Domain\ValueObjects\ResizeMode;
+use Plugins\Image\Domain\ValueObjects\VariantSize;
 use Plugins\Image\Infrastructure\Engines\Concerns\InspectsImages;
 
 /**
@@ -131,8 +132,12 @@ final class ImagickImageEngine implements ImageProcessorContract
     public function orient(string $contents): string
     {
         $format = $this->detectFormat($contents);
-        $img    = $this->decode($contents);
+        $img    = $this->decode($contents, upright: false);
         try {
+            $orientation = $img->getImageOrientation();
+            if ($orientation <= \Imagick::ORIENTATION_TOPLEFT) {
+                return $contents; // already upright: the contract promises the bytes back untouched
+            }
             $this->autoOrient($img);
             return $this->encode($img, $format, $this->defaultQuality);
         } finally {
@@ -141,7 +146,7 @@ final class ImagickImageEngine implements ImageProcessorContract
     }
 
     /**
-     * @param array<string, int> $presets
+     * @param array<string, int|array{0: int, 1: int}> $presets
      * @return array<string, ImageVariant>
      */
     public function variants(
@@ -151,6 +156,7 @@ final class ImagickImageEngine implements ImageProcessorContract
         ?int $quality = null,
         ResizeMode $mode = ResizeMode::Cover,
     ): array {
+        $sizes        = array_map(VariantSize::from(...), $presets);
         $targetFormat = $format ?? $this->detectFormat($contents);
         $q            = $quality ?? $this->defaultQuality;
 
@@ -163,13 +169,11 @@ final class ImagickImageEngine implements ImageProcessorContract
         // pipeline) ran once PER PRESET instead of once total.
         $img = $this->decode($contents);
         try {
-            $this->autoOrient($img);
-
             $result = [];
-            foreach ($presets as $name => $width) {
+            foreach ($sizes as $name => $size) {
                 $clone = clone $img;
                 try {
-                    $bytes = $this->resizeFromImage($clone, (int) $width, null, $mode, $targetFormat, $q);
+                    $bytes = $this->resizeFromImage($clone, $size->width, $size->height, $mode, $targetFormat, $q);
                 } finally {
                     $clone->destroy();
                 }
@@ -440,7 +444,6 @@ final class ImagickImageEngine implements ImageProcessorContract
         $img       = $this->decode($contents);
 
         try {
-            $this->autoOrient($img);
             return $this->resizeFromImage($img, $width, $height, $mode, $srcFormat, $this->defaultQuality);
         } finally {
             $img->destroy();
@@ -510,8 +513,15 @@ final class ImagickImageEngine implements ImageProcessorContract
      * was tried FIRST and verified NOT to engage shrink-on-load in this
      * environment (decoded width stayed at the full 2000, not the hinted
      * 100) — 'jpeg:size' is the one that actually works.
+     *
+     * $upright (the default) applies the EXIF orientation and converts CMYK
+     * to sRGB straight away: encode() strips metadata, so an orientation not
+     * applied here would publish a phone photo sideways from convert(),
+     * crop(), the filters and the watermarks — not only resize()/variants()
+     * applied it before. crop() coordinates are therefore relative to the
+     * upright picture, which is also what a browser shows.
      */
-    private function decode(string $contents, ?string $sizeHint = null): \Imagick
+    private function decode(string $contents, ?string $sizeHint = null, bool $upright = true): \Imagick
     {
         $this->guardDecodable($contents);
 
@@ -521,13 +531,25 @@ final class ImagickImageEngine implements ImageProcessorContract
                 $img->setOption('jpeg:size', $sizeHint);
             }
             $img->readImageBlob($contents);
-            return $img;
         } catch (\ImagickException $e) {
             throw new \DomainException(
                 'Image(Imagick): could not decode image data — unsupported or corrupt file.',
                 previous: $e,
             );
         }
+
+        if ($upright) {
+            $this->autoOrient($img);
+            try {
+                if ($img->getImageColorspace() === \Imagick::COLORSPACE_CMYK) {
+                    $img->transformImageColorspace(\Imagick::COLORSPACE_SRGB);
+                }
+            } catch (\ImagickException) {
+                // best effort: colour accuracy is not worth failing the operation
+            }
+        }
+
+        return $img;
     }
 
     /**
@@ -539,10 +561,16 @@ final class ImagickImageEngine implements ImageProcessorContract
     private function encode(\Imagick $img, ImageFormat $format, int $quality): string
     {
         try {
+            if ($format === ImageFormat::Jpeg && $img->getImageAlphaChannel()) {
+                // JPEG has no alpha: without this the transparent pixels'
+                // own colour (usually black) shows through.
+                $img->setImageBackgroundColor(new \ImagickPixel('white'));
+                $img->setImageAlphaChannel(\Imagick::ALPHACHANNEL_REMOVE);
+            }
             $img->stripImage();
             $img->setImageFormat(strtoupper($format->value));
             $img->setImageCompressionQuality(max(1, min(100, $quality)));
-            return $img->getImageBlob();
+            return $this->assertEncoded($img->getImageBlob(), $format, 'Imagick');
         } catch (\ImagickException $e) {
             throw new GatewayException(
                 "Image(Imagick): failed to encode image as [{$format->value}]: {$e->getMessage()}",

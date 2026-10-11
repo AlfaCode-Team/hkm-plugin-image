@@ -11,6 +11,7 @@ use Plugins\Image\Domain\ValueObjects\ImageFormat;
 use Plugins\Image\Domain\ValueObjects\ImageVariant;
 use Plugins\Image\Domain\ValueObjects\Position;
 use Plugins\Image\Domain\ValueObjects\ResizeMode;
+use Plugins\Image\Domain\ValueObjects\VariantSize;
 use Plugins\Image\Infrastructure\Engines\Concerns\InspectsImages;
 
 /**
@@ -37,6 +38,13 @@ use Plugins\Image\Infrastructure\Engines\Concerns\InspectsImages;
  * - Saturation has no native GD filter; adjustColor() falls back to a
  *   per-pixel blend loop, which is O(width x height) and meaningfully
  *   slower than Imagick's/Vips' native saturation on large images.
+ * - GD refuses to write a PALETTE image (PNG-8, GIF) as WebP or AVIF, and
+ *   reports it only as a warning. decode() therefore promotes every image to
+ *   truecolor, keeping its transparency, before anything else touches it.
+ * - GD has no shrink-on-load: a 24-megapixel photo is decoded at full size,
+ *   roughly 4 bytes a pixel, OUTSIDE PHP's memory_limit (libgd allocates
+ *   with malloc). Prefer IMAGE_DRIVER=vips where many large uploads land at
+ *   once.
  */
 final class GdImageEngine implements ImageProcessorContract
 {
@@ -75,21 +83,15 @@ final class GdImageEngine implements ImageProcessorContract
     public function orient(string $contents): string
     {
         $format = $this->detectFormat($contents);
-        if ($format !== ImageFormat::Jpeg) {
+        if ($format !== ImageFormat::Jpeg || $this->readOrientation($contents) <= 1) {
             return $contents; // only JPEG carries an EXIF Orientation tag here
         }
 
-        $orientation = $this->readOrientation($contents);
-        if ($orientation <= 1) {
-            return $contents;
-        }
-
-        $img = $this->applyOrientation($this->decode($contents), $orientation);
-        return $this->encode($img, $format, 92);
+        return $this->encode($this->decode($contents), $format, 92); // decode() turns it upright
     }
 
     /**
-     * @param array<string, int> $presets
+     * @param array<string, int|array{0: int, 1: int}> $presets
      * @return array<string, ImageVariant>
      */
     public function variants(
@@ -99,30 +101,21 @@ final class GdImageEngine implements ImageProcessorContract
         ?int $quality = null,
         ResizeMode $mode = ResizeMode::Cover,
     ): array {
-        // Detected from $contents itself, NEVER from $format: orientation
-        // must be decided from the SOURCE bytes' real format regardless of
-        // what the caller wants to re-encode to. Previously this used
-        // $targetFormat for the Jpeg check too (via resizeInternal()'s own
-        // $format ?? detectFormat()), so calling variants(..., ImageFormat::Webp)
-        // on a real EXIF-rotated JPEG silently skipped auto-orientation —
-        // $targetFormat !== ImageFormat::Jpeg short-circuited the read even
-        // though the source bytes were a JPEG.
-        $sourceFormat = $this->detectFormat($contents);
-        $targetFormat = $format ?? $sourceFormat;
+        // Orientation is decided by decode() from the SOURCE bytes' real
+        // format, never from $format: variants(..., ImageFormat::Webp) on an
+        // EXIF-rotated JPEG must still come out upright.
+        $sizes        = array_map(VariantSize::from(...), $presets);
+        $targetFormat = $format ?? $this->detectFormat($contents);
         $q            = $quality ?? $this->defaultQuality;
 
         // Decode + auto-orient ONCE and reuse for every preset —
         // imagecopyresampled() reads from $src without mutating it, so the
-        // same decoded image is safe to resample from repeatedly. Previously
-        // each preset re-ran resizeInternal() from scratch: a full
-        // imagecreatefromstring() decode (usually the single most expensive
-        // step in the whole pipeline) plus a fresh EXIF read ran once PER
-        // PRESET instead of once total.
-        $src = $this->decodeOriented($contents, $sourceFormat);
+        // same decoded image is safe to resample from repeatedly.
+        $src = $this->decode($contents);
 
         $result = [];
-        foreach ($presets as $name => $width) {
-            $bytes = $this->resizeFromImage($src, (int) $width, null, $mode, $targetFormat, $q);
+        foreach ($sizes as $name => $size) {
+            $bytes = $this->resizeFromImage($src, $size->width, $size->height, $mode, $targetFormat, $q);
             $dims  = $this->dimensions($bytes);
             $result[$name] = new ImageVariant($name, $bytes, $dims->width, $dims->height, $targetFormat);
         }
@@ -304,6 +297,7 @@ final class GdImageEngine implements ImageProcessorContract
         [$r, $g, $b] = $this->hexToRgb($textColor);
 
         $useTtf = $this->watermarkTtfPath !== null && is_file($this->watermarkTtfPath);
+        imagealphablending($img, true); // blend the (possibly translucent) text INTO the picture
 
         if ($useTtf) {
             $box = imagettfbbox($fontSize, 0, $this->watermarkTtfPath, $text);
@@ -380,18 +374,8 @@ final class GdImageEngine implements ImageProcessorContract
     private function resizeInternal(string $contents, int $width, ?int $height, ResizeMode $mode): string
     {
         $srcFormat = $this->detectFormat($contents);
-        $src       = $this->decodeOriented($contents, $srcFormat);
 
-        return $this->resizeFromImage($src, $width, $height, $mode, $srcFormat, $this->defaultQuality);
-    }
-
-    /** Decodes + applies EXIF auto-orientation (JPEG only) in one step — shared by resize() and variants(). */
-    private function decodeOriented(string $contents, ImageFormat $srcFormat): \GdImage
-    {
-        $orientation = $srcFormat === ImageFormat::Jpeg ? $this->readOrientation($contents) : 1;
-        $src         = $this->decode($contents);
-
-        return $orientation > 1 ? $this->applyOrientation($src, $orientation) : $src;
+        return $this->resizeFromImage($this->decode($contents), $width, $height, $mode, $srcFormat, $this->defaultQuality);
     }
 
     /**
@@ -506,6 +490,24 @@ final class GdImageEngine implements ImageProcessorContract
         return $canvas;
     }
 
+    /**
+     * Every pixel operation starts here, and every one gets the same image:
+     *
+     * - TRUECOLOR. A PNG-8 or GIF decodes as a palette image, which GD
+     *   refuses to write as WebP or AVIF ("Palette image not supported by
+     *   webp" — a warning, not an exception), and whose palette fills up
+     *   under the saturation loop. imagepalettetotruecolor() keeps the
+     *   palette's transparent entry as real alpha.
+     * - ALPHA KEPT. Blending off + saveAlpha on, so a transparent PNG
+     *   written back as PNG/WebP/AVIF is still transparent (GD's default
+     *   for a decoded image is to drop the alpha channel on save).
+     * - UPRIGHT. Every encode() drops EXIF, Orientation included, so an
+     *   operation that did not apply it would publish a phone photo sideways.
+     *   Applying it here makes that true of convert(), crop(), the filters
+     *   and the watermarks too, not only of resize() and variants(). crop()
+     *   coordinates are therefore relative to the upright picture, which is
+     *   also what a browser shows the person choosing them.
+     */
     private function decode(string $contents): \GdImage
     {
         $this->guardDecodable($contents);
@@ -514,33 +516,76 @@ final class GdImageEngine implements ImageProcessorContract
         if (!$img instanceof \GdImage) {
             throw new \DomainException('Image(GD): could not decode image data — unsupported or corrupt file.');
         }
-        return $img;
+
+        if (!imagepalettetotruecolor($img) || !imagealphablending($img, false) || !imagesavealpha($img, true)) {
+            throw new GatewayException('Image(GD): could not prepare the decoded image.', layer: 'gateway.image.gd');
+        }
+
+        $orientation = $this->detectFormat($contents) === ImageFormat::Jpeg ? $this->readOrientation($contents) : 1;
+
+        return $orientation > 1 ? $this->applyOrientation($img, $orientation) : $img;
     }
 
+    /**
+     * Written to a memory stream, never through ob_start(): with
+     * display_errors on, an output buffer also captures the text of any
+     * warning the encoder raises, and that text then came back as the
+     * "image" — a 173-byte "Warning: imagewebp(): …" saved as photo.webp.
+     * A warning is caught here and reported, and the bytes are checked to
+     * really be $format before they leave (assertEncoded()).
+     */
     private function encode(\GdImage $img, ImageFormat $format, int $quality): string
     {
         $q = max(0, min(100, $quality));
 
-        ob_start();
-        $ok = match ($format) {
-            ImageFormat::Jpeg => imagejpeg($img, null, $q),
-            ImageFormat::Png  => imagepng($img, null, (int) round((100 - $q) / 100 * 9)),
-            ImageFormat::Webp => imagewebp($img, null, $q),
-            ImageFormat::Gif  => imagegif($img),
-            ImageFormat::Avif => function_exists('imageavif')
-                ? imageavif($img, null, $q)
-                : throw new GatewayException(
-                    'Image(GD): AVIF encoding requires GD built against libavif (function imageavif() is missing).',
-                    layer: 'gateway.image.gd',
-                ),
-        };
-        $bytes = ob_get_clean();
-
-        if ($ok === false || $bytes === false || $bytes === '') {
-            throw new GatewayException("Image(GD): failed to encode image as [{$format->value}].", layer: 'gateway.image.gd');
+        if ($format === ImageFormat::Avif && !function_exists('imageavif')) {
+            throw new GatewayException(
+                'Image(GD): AVIF encoding requires GD built against libavif (function imageavif() is missing).',
+                layer: 'gateway.image.gd',
+            );
+        }
+        if ($format === ImageFormat::Jpeg) {
+            $img = $this->flattenOntoWhite($img); // JPEG has no alpha: GD would turn transparency black
         }
 
-        return $bytes;
+        $stream  = fopen('php://memory', 'w+b');
+        $warning = null;
+        set_error_handler(static function (int $level, string $message) use (&$warning): bool {
+            $warning ??= $message;
+            return true;
+        });
+        try {
+            $ok = match ($format) {
+                ImageFormat::Jpeg => imagejpeg($img, $stream, $q),
+                ImageFormat::Png  => imagepng($img, $stream, (int) round((100 - $q) / 100 * 9)),
+                ImageFormat::Webp => imagewebp($img, $stream, $q),
+                ImageFormat::Gif  => imagegif($img, $stream),
+                ImageFormat::Avif => imageavif($img, $stream, $q),
+            };
+        } finally {
+            restore_error_handler();
+        }
+        rewind($stream);
+        $bytes = (string) stream_get_contents($stream);
+        fclose($stream);
+
+        if ($ok === false) {
+            $bytes = '';
+        }
+
+        return $this->assertEncoded($bytes, $format, 'GD', $warning);
+    }
+
+    private function flattenOntoWhite(\GdImage $img): \GdImage
+    {
+        $w      = imagesx($img);
+        $h      = imagesy($img);
+        $canvas = $this->newCanvas($w, $h, ImageFormat::Jpeg); // white, blending on
+        if (!imagecopy($canvas, $img, 0, 0, 0, 0, $w, $h)) {
+            throw new GatewayException('Image(GD): could not flatten transparency for JPEG.', layer: 'gateway.image.gd');
+        }
+
+        return $canvas;
     }
 
     /** @return int EXIF Orientation tag (1-8), or 1 when absent/unreadable */

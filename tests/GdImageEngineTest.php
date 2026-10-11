@@ -274,7 +274,6 @@ final class GdImageEngineTest extends TestCase
         $engine = $this->engine();
         $ref    = new \ReflectionClass($engine);
         $method = $ref->getMethod('applyOrientation');
-        $method->setAccessible(true);
 
         $w = 200;
         $h = 100;

@@ -24,6 +24,14 @@ use Plugins\Image\Domain\ValueObjects\ResizeMode;
  *
  * A route or job that resolves this contract MUST declare
  * `"requires": ["image.processing"]` in its module.json.
+ *
+ * Every engine keeps these promises (tests/EngineConformanceTestCase.php):
+ * - output is UPRIGHT: the EXIF orientation is applied while decoding, as
+ *   every encode drops EXIF (and with it GPS and the rest of the metadata);
+ * - any input format converts to any output format, palette PNG/GIF included;
+ * - transparency is kept where the output format has it, white in a JPEG;
+ * - returned bytes are always really the requested format, never empty or
+ *   foreign: a failed encode is a GatewayException.
  */
 interface ImageProcessorContract
 {
@@ -65,9 +73,9 @@ interface ImageProcessorContract
     ): string;
 
     /**
-     * Re-encode into a different format. $quality (1-100) falls back to the
-     * engine's configured default (IMAGE_QUALITY) when omitted; ignored for
-     * Gif.
+     * Re-encode into a different format, upright (see orient()).
+     * $quality (1-100) falls back to the engine's configured default
+     * (IMAGE_QUALITY) when omitted; ignored for Gif.
      *
      * @return string re-encoded image bytes
      * @throws \DomainException if $contents is not a decodable image
@@ -103,10 +111,13 @@ interface ImageProcessorContract
      * Generate several named renditions in one pass — the responsive
      * thumbnail/medium/large set a gallery or srcset needs. $presets maps a
      * variant name to its target width, e.g. image_variant_presets()'s
-     * ['thumbnail' => 150, 'medium' => 300, 'large' => 1024]. Each variant is
-     * auto-oriented before resizing.
+     * ['thumbnail' => 150, 'medium' => 300, 'large' => 1024], or to a
+     * [width, height] BOX: ['full' => [2048, 2048]] fits inside 2048x2048
+     * whichever way the upright picture is turned (with Contain; Cover fills
+     * the box exactly). Each variant is auto-oriented before resizing.
      *
-     * @param array<string, int> $presets variant name => target width
+     * @param array<string, int|array{0: int, 1: int}> $presets variant name => width, or [width, height] box
+     * @throws \DomainException for a preset that is neither (see VariantSize)
      * @return array<string, ImageVariant> variant name => result, same key order as $presets
      * @throws \DomainException if $contents is not a decodable image
      * @throws GatewayException on an underlying engine failure
@@ -125,6 +136,8 @@ interface ImageProcessorContract
      * resize()'s automatic Cover/Contain/Smart framing. $x/$y/$width/$height
      * are clamped to the source's actual bounds rather than erroring on an
      * out-of-range request, so a UI doesn't need to pre-clamp its own math.
+     * They are relative to the UPRIGHT picture (EXIF orientation applied) —
+     * what a browser shows the person choosing them.
      *
      * @return string re-encoded image bytes, exactly $width x $height (or
      *     less, if the clamped rectangle came out smaller than requested)

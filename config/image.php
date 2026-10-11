@@ -63,6 +63,8 @@ return [
     | Variant Presets
     |--------------------------------------------------------------------------
     | "name:width,name:width,…" — fed to variants() via image_variant_presets().
+    | "name:WxH" is a box instead of a width: the variant fits inside W x H
+    | whichever way the picture is turned (e.g. "full:2048x2048").
     | Mirrors the fixed 150/300/1024 thumbnail/medium/large sizes the 0.3
     | ImageService hardcoded, now configurable per project.
     */

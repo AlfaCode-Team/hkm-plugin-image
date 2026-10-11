@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Plugins\Image\Infrastructure\Engines\Concerns;
 
+use AlfacodeTeam\PhpServicePlatform\Kernel\Exceptions\GatewayException;
 use Plugins\Image\Domain\Rules\AllowedMimeRule;
 use Plugins\Image\Domain\Rules\MaxBytesRule;
 use Plugins\Image\Domain\Rules\MaxDimensionsRule;
@@ -87,5 +88,26 @@ trait InspectsImages
         ImageFormat::fromMime($info['mime']);
 
         MaxDimensionsRule::check(new Dimensions((int) $info[0], (int) $info[1]), $this->maxWidth, $this->maxHeight);
+    }
+
+    /**
+     * The last thing every engine's encode() does: the bytes going out must
+     * really be an image of $format. An encoder that "succeeds" with empty or
+     * foreign output (GD writing a palette image as WebP prints a warning and
+     * returns true) becomes a GatewayException here, instead of a file a
+     * caller stores and serves as a picture.
+     */
+    private function assertEncoded(string $bytes, ImageFormat $format, string $engine, ?string $reason = null): string
+    {
+        $info = $bytes === '' ? false : @getimagesizefromstring($bytes);
+
+        if ($info === false || ($info['mime'] ?? '') !== $format->mimeType()) {
+            throw new GatewayException(
+                "Image({$engine}): failed to encode image as [{$format->value}]" . ($reason !== null ? ": {$reason}" : '.'),
+                layer: 'gateway.image.' . strtolower($engine),
+            );
+        }
+
+        return $bytes;
     }
 }
