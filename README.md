@@ -91,10 +91,16 @@ photo comes out slightly duller through GD.
 | | GD (default) | Vips | Imagick |
 |---|---|---|---|
 | Needs | `ext-gd` | `ext-ffi` + libvips | `ext-imagick` |
-| Large photos | decodes at full size: ~4 bytes/pixel, outside `memory_limit` | shrink-on-load: a 24 MP JPEG becomes a thumbnail without a full decode | `jpeg:size` hint for placeholders only |
+| Large photos | decodes at full size, outside `memory_limit` | shrink-on-load for small sizes | `jpeg:size` hint for placeholders only |
+| Peak memory, measured¹ | 180 MB / 275 MB | 160 MB / 185–225 MB | not measured |
 | Colour profiles | ignored | converted to sRGB | CMYK converted |
 | Animated WebP input | refused (GD cannot read it) | first frame | first frame |
 | `ResizeMode::Smart` | same as Cover | content-aware | same as Cover |
+
+¹ The whole PHP process making a 2048px WebP plus 160/480/1280 copies with one
+`variants()` call: a 12-megapixel phone photo / an 8000×6000 JPEG, libvips 8.18
+on macOS. Before any picture, GD's process is 35 MB and Vips' is 55 MB.
+`VIPS_CONCURRENCY=1` lowers Vips by a further 10–20% and costs speed.
 
 `IMAGE_DRIVER=auto` uses Vips when it can actually load, then Imagick, then GD.
 
