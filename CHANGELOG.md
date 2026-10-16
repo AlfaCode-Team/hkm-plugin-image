@@ -6,6 +6,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-10-16
+
+### Changed
+
+- Requires kernel `^1.19.0` (was `^1.0`). Every first-party plugin now
+  declares the current kernel release as its floor. No code changed.
+
 ## [1.1.0] - 2026-10-11
 
 Found by running every contract method over awkward real-world files (phone
